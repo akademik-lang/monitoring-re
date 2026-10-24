@@ -8,21 +8,28 @@ Fitur:
   - Nilai tiap session (Grammar, Listening, Reading, Test Prep) rapi
   - Threshold TOEFL >= 403 → layak sertifikat
   - Cek otomatis file sertifikat di Google Drive per kelas
+  - Cek nama mahasiswa ke SIAKAD (sip.sains.ac.id) by NIM
+  - Cache SIAKAD: nama yang sudah "Cocok" di-skip, yang bermasalah di-re-cek
   - 1 file Excel, multiple sheet: RINGKASAN + 1 sheet per kelas
   - Penamaan sheet unik dari path folder
 
 Cara pakai:
-  python generate_excel.py
+  python generate_excel.py          # Normal: skip nama yang sudah "Cocok"
+  python generate_excel.py --full   # Cek semua mahasiswa dari awal (abaikan cache)
 
 Credential: auth/credentials.json (OAuth2 installed)
+            auth/siakad_session.json (cookie SIAKAD)
+            auth/siakad_cache.json (cache hasil SIAKAD, auto-generated)
 """
 
 import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 
+import requests
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -41,6 +48,11 @@ DATA_JSON     = os.path.join(BASE_DIR, "data.json")
 CRED_FILE     = os.path.join(BASE_DIR, "auth", "credentials.json")
 TOKEN_FILE    = os.path.join(BASE_DIR, "auth", "token.json")
 TOEFL_PASS    = 403   # Nilai minimum layak sertifikat
+
+# SIAKAD
+SIAKAD_CONFIG_FILE = os.path.join(BASE_DIR, "auth", "siakad_session.json")
+SIAKAD_URL   = "https://sip.sains.ac.id/mahasiswa/listdata"
+SIAKAD_CACHE_FILE = os.path.join(BASE_DIR, "auth", "siakad_cache.json")
 
 # Scope: baca metadata file Drive (tidak perlu download)
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -215,6 +227,189 @@ def is_cert_in_drive(student_name, drive_files_set):
     return False
 
 
+# ─── SIAKAD API ───────────────────────────────────────────────────────────────
+_siakad_cache = {}   # cache NIM → nama SIAKAD (hindari request berulang)
+
+def load_siakad_config():
+    """Load cookie session SIAKAD dari auth/siakad_session.json."""
+    if not os.path.exists(SIAKAD_CONFIG_FILE):
+        return None
+    try:
+        with open(SIAKAD_CONFIG_FILE, 'r') as f:
+            cfg = json.load(f)
+        if not cfg.get('csrf_cookie_name') or not cfg.get('siakad_session'):
+            print("    WARNING: Cookie SIAKAD kosong. Update auth/siakad_session.json.")
+            return None
+        return cfg
+    except Exception as e:
+        print(f"    WARNING: Gagal load config SIAKAD: {e}")
+        return None
+
+
+def load_siakad_cache():
+    """Load persistent cache hasil SIAKAD dari file."""
+    if not os.path.exists(SIAKAD_CACHE_FILE):
+        return {}
+    try:
+        with open(SIAKAD_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_siakad_cache(cache):
+    """Simpan cache hasil SIAKAD ke file."""
+    try:
+        with open(SIAKAD_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"    WARNING: Gagal simpan cache SIAKAD: {e}")
+
+
+def build_siakad_body(nim, draw=4):
+    """Bangun body request DataTables untuk search by NIM."""
+    body = {}
+    # 9 kolom (index 0-8), kolom 0 tidak orderable
+    for i in range(9):
+        body[f"columns[{i}][data]"]      = str(i)
+        body[f"columns[{i}][name]"]      = ""
+        body[f"columns[{i}][searchable]"] = "true"
+        body[f"columns[{i}][orderable]"]  = "false" if i == 0 else "true"
+        body[f"columns[{i}][search][value]"] = ""
+        body[f"columns[{i}][search][regex]"] = "false"
+    body["draw"]            = str(draw)
+    body["order[0][column]"] = "3"
+    body["order[0][dir]"]    = "asc"
+    body["start"]            = "0"
+    body["length"]           = "10"
+    body["search[value]"]    = str(nim)
+    body["search[regex]"]    = "false"
+    body["jenjangprodi"]     = ""
+    body["lokasi"]           = ""
+    body["angkatan"]         = ""
+    body["status"]           = ""
+    body["jk"]               = ""
+    body["agama"]            = ""
+    body["id_kls"]           = ""
+    return body
+
+
+def fetch_siakad_name(nim, siakad_config):
+    """
+    Query SIAKAD untuk cari mahasiswa by NIM.
+    Return: nama mahasiswa (str) atau None jika tidak ketemu / error.
+    """
+    if not siakad_config or not nim:
+        return None
+
+    # Cek cache
+    if nim in _siakad_cache:
+        return _siakad_cache[nim]
+
+    cookies = {
+        "csrf_cookie_name": siakad_config.get("csrf_cookie_name", ""),
+        "siakad_session":   siakad_config.get("siakad_session", ""),
+    }
+    headers = {
+        "Accept":          "application/json, text/javascript, */*; q=0.01",
+        "Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/156.0.0.0 Safari/537.36",
+        "Origin":   "https://sip.sains.ac.id",
+        "Referer":  "https://sip.sains.ac.id/mahasiswa",
+    }
+
+    try:
+        resp = requests.post(
+            SIAKAD_URL,
+            cookies=cookies,
+            headers=headers,
+            data=build_siakad_body(nim),
+            timeout=15,
+        )
+        resp.raise_for_status()
+
+        # Cek apakah response JSON (bukan redirect ke login)
+        try:
+            result = resp.json()
+        except ValueError:
+            print(f"      SIAKAD: Response bukan JSON (mungkin session expired). NIM={nim}")
+            _siakad_cache[nim] = None
+            return None
+
+        rows = result.get("data", [])
+        if not rows:
+            _siakad_cache[nim] = None
+            return None
+
+        # Cari baris yang NIM-nya cocok (index 2 = NIM, index 3 = nama)
+        for row in rows:
+            if len(row) >= 4 and str(row[2]).strip() == str(nim).strip():
+                name = str(row[3]).strip()
+                _siakad_cache[nim] = name
+                return name
+
+        # Fallback: ambil baris pertama
+        name = str(rows[0][3]).strip()
+        _siakad_cache[nim] = name
+        return name
+
+    except requests.exceptions.RequestException as e:
+        print(f"      SIAKAD ERROR NIM={nim}: {e}")
+        _siakad_cache[nim] = None
+        return None
+
+
+def normalize_name(name):
+    """Normalisasi nama untuk perbandingan."""
+    if not name:
+        return ""
+    n = name.strip().lower()
+    n = re.sub(r'\s+', ' ', n)               # collapse multiple spaces
+    # Hapus gelar di depan
+    n = re.sub(
+        r'^(dr\.|prof\.|ir\.|mr\.|mrs\.|s\.t\.|s\.kom\.|s\.si\.|m\.t\.|m\.kom\.|s\.pd\.|s\.pd)\s*',
+        '', n
+    )
+    return n.strip()
+
+
+def compare_names(name_ods, name_siakad):
+    """
+    Bandingkan nama dari ODS dengan nama dari SIAKAD.
+    Return: (match: bool|None, detail: str)
+      True  → cocok
+      False → beda
+      None  → tidak bisa cek (SIAKAD error / tidak ketemu)
+    """
+    if not name_siakad:
+        return None, "N/A"
+
+    n1 = normalize_name(name_ods)
+    n2 = normalize_name(name_siakad)
+
+    if not n1 or not n2:
+        return None, "N/A"
+
+    # Exact match setelah normalisasi
+    if n1 == n2:
+        return True, "Cocok"
+
+    # Cek contains (salah satu mengandung yang lain)
+    if n1 in n2 or n2 in n1:
+        return True, "Cocok"
+
+    # Cek kata-per-kata (urutan beda tapi kata sama)
+    words1 = set(n1.split())
+    words2 = set(n2.split())
+    if words1 == words2:
+        return True, "Cocok"
+
+    return False, "Beda"
+
+
 # ─── PARSE SCORM COLUMNS ──────────────────────────────────────────────────────
 def parse_scorm_columns(headers):
     """
@@ -277,7 +472,7 @@ def read_ods(file_path):
     return data, headers
 
 
-def build_class_sheet(wb, file_info, drive_service):
+def build_class_sheet(wb, file_info, drive_service, siakad_config=None, siakad_cache=None, full_check=False):
     """Buat sheet detail satu kelas. Return dict info untuk ringkasan."""
     file_path  = os.path.join(BASE_DIR, file_info['filePath'].replace('./', ''))
     drive_url  = file_info['googleDriveUrl']
@@ -317,7 +512,7 @@ def build_class_sheet(wb, file_info, drive_service):
     SUBTYPES = ['Grammar', 'Listening', 'Reading', 'Test Prep']
     fixed_start = 4   # No, Nama, NIM, Email
     scorm_count = len(session_nums) * len(SUBTYPES)
-    fixed_end   = 4   # TOEFL, Layak?, Status Drive, Keterangan
+    fixed_end   = 6   # TOEFL, Layak?, Drive, Nama SIAKAD, Nama Cocok?, Keterangan
     total_cols  = fixed_start + scorm_count + fixed_end
     last_col    = get_column_letter(total_cols)
 
@@ -378,9 +573,11 @@ def build_class_sheet(wb, file_info, drive_service):
         "TOEFL\nScore",
         f"Layak\nSertifikat?\n(≥{TOEFL_PASS})",
         "Sertifikat\ndi Drive",
+        "Nama di\nSIAKAD",
+        "Nama\nCocok?",
         "Keterangan"
     ]
-    end_bgs = [C["HEADER_BG"], "1E8449", "6C3483", C["HEADER_BG"]]
+    end_bgs = [C["HEADER_BG"], "1E8449", "6C3483", "1A5276", "1A5276", C["HEADER_BG"]]
     for bi, (label, bg) in enumerate(zip(end_labels, end_bgs)):
         ci = end_col_start + bi
         ws.merge_cells(start_row=3, start_column=ci, end_row=4, end_column=ci)
@@ -398,6 +595,9 @@ def build_class_sheet(wb, file_info, drive_service):
     cert_yes_count = 0
     cert_no_count  = 0
     cert_unk_count = 0
+    name_match_count    = 0
+    name_mismatch_count = 0
+    name_unk_count      = 0
 
     for ri, (_, row) in enumerate(data.iterrows(), 1):
         er = 4 + ri
@@ -406,6 +606,41 @@ def build_class_sheet(wb, file_info, drive_service):
         full_name = get_name(row)
         nim       = str(row.get('Username', '')).strip()
         email     = str(row.get('Email address', '')).strip()
+
+        # ── Cek nama ke SIAKAD ────────────────────────────────────────────────
+        siakad_name = None
+        name_match = None
+        if siakad_config:
+            cached = siakad_cache.get(nim) if siakad_cache and not full_check else None
+
+            if cached and cached.get("last_match") is True and cached.get("siakad_name"):
+                # Sudah cocok sebelumnya → skip API call, pakai cache
+                siakad_name = cached["siakad_name"]
+                name_match, _ = compare_names(full_name, siakad_name)
+                tag = "✅" if name_match else "❌"
+                print(f"      [{ri}/{total_students}] NIM {nim} → cache: {siakad_name} ({tag})")
+            else:
+                # Belum di-cache / bermasalah / full check → query SIAKAD
+                label = "re-cek" if cached else "cek"
+                print(f"      [{ri}/{total_students}] NIM {nim} → {label} SIAKAD...", end='', flush=True)
+                siakad_name = fetch_siakad_name(nim, siakad_config)
+                name_match, _ = compare_names(full_name, siakad_name)
+                if siakad_name:
+                    status = "✅ cocok" if name_match else "❌ BEDA"
+                    print(f" {siakad_name} ({status})")
+                else:
+                    print(" tidak ditemukan / error")
+                time.sleep(0.3)  # hindari rate-limit
+
+            # Update cache
+            if siakad_cache is not None:
+                siakad_cache[nim] = {"siakad_name": siakad_name, "last_match": name_match}
+        else:
+            name_match = None
+
+        if name_match is True:    name_match_count += 1
+        elif name_match is False: name_mismatch_count += 1
+        else:                     name_unk_count += 1
 
         # TOEFL
         toefl_raw = safe(row.get('TOEFL (Real)', '-'))
@@ -495,8 +730,28 @@ def build_class_sheet(wb, file_info, drive_service):
             cell.value = "⚠️ N/A"
             dat(cell, bg=C["CERT_SKIP"], fg="5D6D7E")
 
+        # Nama di SIAKAD
+        ci_siakad = end_col_start + 3
+        cell = ws.cell(row=er, column=ci_siakad)
+        cell.value = siakad_name if siakad_name else "—"
+        dat(cell, bg=bg, align='left', size=9,
+            fg="000000" if siakad_name else "7F8C8D")
+
+        # Nama Cocok?
+        ci_match = end_col_start + 4
+        cell = ws.cell(row=er, column=ci_match)
+        if name_match is True:
+            cell.value = "✅ Cocok"
+            dat(cell, bg=C["PASS_BG"], fg="1E8449", bold=True)
+        elif name_match is False:
+            cell.value = "❌ Beda"
+            dat(cell, bg=C["FAIL_BG"], fg=C["CERT_NO"], bold=True)
+        else:
+            cell.value = "⚠️ N/A"
+            dat(cell, bg=C["CERT_SKIP"], fg="5D6D7E")
+
         # Keterangan
-        ci_ket = end_col_start + 3
+        ci_ket = end_col_start + 5
         cell = ws.cell(row=er, column=ci_ket)
         cell.value = ""
         dat(cell, bg=bg, align='left')
@@ -510,7 +765,9 @@ def build_class_sheet(wb, file_info, drive_service):
     sc.value = (
         f"Total: {total_students} mhs  |  Layak Sertifikat: {layak_count}  |  "
         f"Sertifikat Sudah di Drive: {cert_yes_count}  |  "
-        f"Belum di Drive: {cert_no_count}  |  Kelas: {kelas}"
+        f"Belum di Drive: {cert_no_count}  |  "
+        f"Nama Cocok: {name_match_count}  |  Nama Beda: {name_mismatch_count}  |  "
+        f"Kelas: {kelas}"
     )
     sc.fill = fill(C["SUMMARY_BG"])
     sc.font = Font(color=C["SUMMARY_FG"], bold=True, size=10, name="Calibri")
@@ -526,10 +783,12 @@ def build_class_sheet(wb, file_info, drive_service):
     for ci in range(5, 5 + scorm_count):
         ws.column_dimensions[get_column_letter(ci)].width = 11
     # End columns
-    ws.column_dimensions[get_column_letter(end_col_start)].width = 10
-    ws.column_dimensions[get_column_letter(end_col_start + 1)].width = 14
-    ws.column_dimensions[get_column_letter(end_col_start + 2)].width = 14
-    ws.column_dimensions[get_column_letter(end_col_start + 3)].width = 22
+    ws.column_dimensions[get_column_letter(end_col_start)].width = 10      # TOEFL
+    ws.column_dimensions[get_column_letter(end_col_start + 1)].width = 14  # Layak
+    ws.column_dimensions[get_column_letter(end_col_start + 2)].width = 14  # Drive
+    ws.column_dimensions[get_column_letter(end_col_start + 3)].width = 24  # Nama SIAKAD
+    ws.column_dimensions[get_column_letter(end_col_start + 4)].width = 12  # Nama Cocok
+    ws.column_dimensions[get_column_letter(end_col_start + 5)].width = 22  # Keterangan
 
     ws.freeze_panes = ws.cell(row=5, column=5)
 
@@ -543,6 +802,8 @@ def build_class_sheet(wb, file_info, drive_service):
         'drive_url'    : drive_url,
         'sheet_name'   : sheet_name,
         'drive_count'  : len(drive_files_set),
+        'name_match'    : name_match_count,
+        'name_mismatch' : name_mismatch_count,
     }
 
 
@@ -552,7 +813,7 @@ def build_summary_sheet(wb, all_class_data):
     ws.title = "RINGKASAN"
 
     # Judul
-    ws.merge_cells('A1:J1')
+    ws.merge_cells('A1:L1')
     c = ws['A1']
     c.value = "📊  MONITORING SERTIFIKAT TOEFL  |  SEMUA KELAS"
     c.fill = fill(C["TITLE_BG"])
@@ -560,7 +821,7 @@ def build_summary_sheet(wb, all_class_data):
     c.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 42
 
-    ws.merge_cells('A2:J2')
+    ws.merge_cells('A2:L2')
     c2 = ws['A2']
     c2.value = f"Generated: {datetime.now().strftime('%d %B %Y, %H:%M')}  |  Threshold TOEFL: ≥{TOEFL_PASS}"
     c2.fill = fill("1A252F")
@@ -572,6 +833,7 @@ def build_summary_sheet(wb, all_class_data):
         "No", "Kelas", "Semester", "Total\nMahasiswa",
         "Layak\nSertifikat", "File di\nDrive",
         "Belum\ndi Drive", "% Selesai",
+        "Nama\nCocok", "Nama\nBeda",
         "Google Drive", "Sheet"
     ]
     for ci, h in enumerate(sum_headers, 1):
@@ -581,16 +843,19 @@ def build_summary_sheet(wb, all_class_data):
     ws.row_dimensions[3].height = 40
 
     total_mhs = total_layak = total_yes = total_no = 0
+    total_name_match = total_name_mismatch = 0
 
     for ri, info in enumerate(all_class_data, 1):
         er  = 3 + ri
         bg  = C["ROW_ODD"] if ri % 2 == 0 else C["ROW_EVEN"]
         pct = (info['cert_yes'] / info['layak'] * 100) if info['layak'] > 0 else 0
 
-        total_mhs   += info['total']
-        total_layak += info['layak']
-        total_yes   += info['cert_yes']
-        total_no    += info['cert_no']
+        total_mhs          += info['total']
+        total_layak        += info['layak']
+        total_yes          += info['cert_yes']
+        total_no           += info['cert_no']
+        total_name_match   += info['name_match']
+        total_name_mismatch += info['name_mismatch']
 
         row_vals = [
             ri,
@@ -601,6 +866,8 @@ def build_summary_sheet(wb, all_class_data):
             info['cert_yes'],
             info['cert_no'],
             f"{pct:.0f}%",
+            info['name_match'],
+            info['name_mismatch'],
             info['drive_url'],
             info['sheet_name'],
         ]
@@ -609,7 +876,7 @@ def build_summary_sheet(wb, all_class_data):
             if ci == 2:
                 cell.value = val
                 dat(cell, bg=bg, bold=True, align='left')
-            elif ci == 9:
+            elif ci == 11:   # Google Drive link
                 cell.value = "🔗 Buka Drive"
                 cell.hyperlink = val
                 cell.fill = fill(C["DRIVE_BG"])
@@ -622,10 +889,16 @@ def build_summary_sheet(wb, all_class_data):
                 p = info['cert_yes'] / info['layak'] * 100 if info['layak'] > 0 else 0
                 col = C["SCORE_HIGH"] if p >= 80 else (C["SCORE_MED"] if p >= 50 else C["SCORE_LOW"])
                 dat(cell, bg=col, bold=True)
-            elif ci == 6:
+            elif ci == 6:   # cert_yes
                 cell.value = val
                 dat(cell, bg=C["PASS_BG"], bold=True, fg="1E8449")
-            elif ci == 7:
+            elif ci == 7:   # cert_no
+                cell.value = val
+                dat(cell, bg=C["FAIL_BG"] if val > 0 else bg, bold=(val > 0), fg=(C["CERT_NO"] if val > 0 else "000000"))
+            elif ci == 9:   # Nama Cocok
+                cell.value = val
+                dat(cell, bg=C["PASS_BG"] if val > 0 else bg, bold=True, fg="1E8449")
+            elif ci == 10:  # Nama Beda
                 cell.value = val
                 dat(cell, bg=C["FAIL_BG"] if val > 0 else bg, bold=(val > 0), fg=(C["CERT_NO"] if val > 0 else "000000"))
             else:
@@ -645,7 +918,11 @@ def build_summary_sheet(wb, all_class_data):
     ws.row_dimensions[sum_row].height = 28
 
     pct_total = total_yes / total_layak * 100 if total_layak > 0 else 0
-    for ci, val in enumerate([total_mhs, total_layak, total_yes, total_no, f"{pct_total:.0f}%"], start=4):
+    for ci, val in enumerate(
+        [total_mhs, total_layak, total_yes, total_no, f"{pct_total:.0f}%",
+         total_name_match, total_name_mismatch],
+        start=4
+    ):
         cell = ws.cell(row=sum_row, column=ci)
         cell.value = val
         cell.fill = fill(C["SUMMARY_BG"])
@@ -653,7 +930,7 @@ def build_summary_sheet(wb, all_class_data):
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = thin_border
 
-    col_w = [5, 16, 14, 12, 12, 12, 12, 12, 16, 22]
+    col_w = [5, 16, 14, 12, 12, 12, 12, 12, 12, 12, 16, 22]
     for i, w in enumerate(col_w, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = ws['A4']
@@ -677,16 +954,38 @@ def main():
         print("    Lanjut tanpa Drive (kolom sertifikat akan N/A).")
         drive_service = None
 
+    print("\n[1b] Load config SIAKAD...")
+    full_check = '--full' in sys.argv or '-f' in sys.argv
+    siakad_config = load_siakad_config()
+    siakad_cache = {}
+
+    if siakad_config:
+        print("    OK – Cookie SIAKAD ditemukan.")
+        if full_check:
+            print("    MODE: FULL CHECK — cek semua mahasiswa dari awal")
+            siakad_cache = {}
+        else:
+            siakad_cache = load_siakad_cache()
+            print(f"    Cache: {len(siakad_cache)} NIM ter-cache.")
+            print("    Nama 'Cocok' → skip. Nama 'Beda'/'N/A' → re-cek.")
+        print("    Cookie SIAKAD bisa expired. Jika semua N/A, update")
+        print("    auth/siakad_session.json dari browser.")
+    else:
+        print("    SKIP – Tidak ada config SIAKAD (kolom nama akan N/A).")
+        print("           Buat auth/siakad_session.json untuk mengaktifkan.")
+
     print(f"\n[2] Memproses {len(config['files'])} kelas...")
     wb = openpyxl.Workbook()
     all_class_data = []
 
     for file_info in config['files']:
         try:
-            info = build_class_sheet(wb, file_info, drive_service)
+            info = build_class_sheet(wb, file_info, drive_service,
+                                     siakad_config, siakad_cache, full_check)
             all_class_data.append(info)
             print(f"    ✅ {info['class_name']}: {info['total']} mhs, "
-                  f"{info['layak']} layak, {info['cert_yes']} sertifikat di Drive")
+                  f"{info['layak']} layak, {info['cert_yes']} sertifikat di Drive, "
+                  f"{info['name_match']} nama cocok, {info['name_mismatch']} nama beda")
         except Exception as e:
             print(f"    ❌ ERROR {file_info['filePath']}: {e}")
             import traceback; traceback.print_exc()
@@ -707,7 +1006,17 @@ def main():
     print(f"   Total mahasiswa: {sum(d['total'] for d in all_class_data)}")
     print(f"   Total layak sertifikat: {sum(d['layak'] for d in all_class_data)}")
     print(f"   Sertifikat ada di Drive: {sum(d['cert_yes'] for d in all_class_data)}")
+    print(f"   Nama cocok SIAKAD: {sum(d['name_match'] for d in all_class_data)}")
+    print(f"   Nama beda SIAKAD:  {sum(d['name_mismatch'] for d in all_class_data)}")
     print(f"{'=' * 60}")
+
+    # Simpan cache SIAKAD untuk run berikutnya
+    if siakad_config and siakad_cache:
+        save_siakad_cache(siakad_cache)
+        cached_ok = sum(1 for v in siakad_cache.values()
+                        if v.get("last_match") is True)
+        print(f"   Cache SIAKAD disimpan: {len(siakad_cache)} NIM "
+              f"({cached_ok} cocok, {len(siakad_cache) - cached_ok} bermasalah)")
 
     # Buka output folder
     os.startfile(OUTPUT_DIR)
