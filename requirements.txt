@@ -1,0 +1,7 @@
+requests
+pandas
+openpyxl
+odfpy
+google-auth
+google-auth-oauthlib
+google-api-python-client
