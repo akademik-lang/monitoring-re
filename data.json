@@ -20,6 +20,9 @@
             "filePath": "./resource/24-25/genap/v-205.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1Bkn7-GGQog7JgxLXsdFXpMAH-U04E2jM?usp=drive_link"
         },
+
+
+
         {
             "filePath": "./resource/24-25/ganjil/v-102.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1Zddch9yxke6ohZsqBaFUGg1YixhHkaIZ?hl=ID"
@@ -44,6 +47,9 @@
             "filePath": "./resource/24-25/ganjil/v-205.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1089upv9zJEcL_UOVRP-SFm7WEf3zlNaJ?usp=drive_link"
         },
+
+
+
          {
             "filePath": "./resource/25-26/ganjil/v-107.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1dvYlUc3-ZqzPIEXTyBQyiffjwIl4cOdn"
@@ -68,15 +74,37 @@
             "filePath": "./resource/25-26/ganjil/v-105.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1L4f2_dyxt2jNRhYKEJJphpbVjG_OOBLC"
         },
+
+        
+        
+         {
+            "filePath": "./resource/25-26/ganjil/v-307.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/12sBNnj3GIoxtv2N2nfLeZrF0bFKJsBo7"
+        },
+         {
+            "filePath": "./resource/25-26/ganjil/v-310.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1gUUmLhtQpBjk1ZGQqy6xSTNNRjLym47f"
+        },
+         {
+            "filePath": "./resource/25-26/ganjil/v-306.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1v8mM_G46ydbALYD77_oSso2kjoi2YqV8"
+        },
          {
             "filePath": "./resource/25-26/ganjil/v-302.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1Jud20G2MsKEjCTICO_ZxoMzV-xyl_52E"
         },
          {
+            "filePath": "./resource/25-26/ganjil/v-304.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1_yD9icFVwM0X3V9EENRDM3MHZYMARjMd"
+        },
+         {
             "filePath": "./resource/25-26/ganjil/v-301.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1SAsZnMGtkMnikDlvrDfzKIC-6cpey3hn"
         },
-         {
+
+
+
+        {
             "filePath": "./resource/25-26/genap/v-302.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/13kYHDRMG7bB-uJqVp83MiacgDzMCgB0N"
         },
@@ -85,8 +113,20 @@
             "googleDriveUrl": "https://drive.google.com/drive/folders/1S_Puf8O-19gYa1mGNzlOE2m25DQWndMp"
         },
          {
+            "filePath": "./resource/25-26/genap/v-304.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1J8LjA4OVhb2ooipzRw3GLfHcNRAB9bSf"
+        },
+        {
             "filePath": "./resource/25-26/genap/v-306.ods",
             "googleDriveUrl": "https://drive.google.com/drive/folders/1VZmgj0ReaKVRQMGZP4rR_QLgRAdB72Bg"
+        },
+        {
+            "filePath": "./resource/25-26/genap/v-310.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1OgSzi4AUhZL_eElWR2iOgabB_xqmVKYd"
+        },
+        {
+            "filePath": "./resource/25-26/genap/v-307.ods",
+            "googleDriveUrl": "https://drive.google.com/drive/folders/1TBTZfzUa5e1Ch2QEsIjwLHtrpIdbwSiF"
         }
     ]
 }

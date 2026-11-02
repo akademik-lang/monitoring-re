@@ -3,23 +3,70 @@ generate_excel.py
 =================
 Generator Excel monitoring mahasiswa TOEFL dari file ODS.
 
-Fitur:
-  - Baca semua kelas dari data.json
-  - Nilai tiap session (Grammar, Listening, Reading, Test Prep) rapi
-  - Threshold TOEFL >= 403 → layak sertifikat
-  - Cek otomatis file sertifikat di Google Drive per kelas
-  - Cek nama mahasiswa ke SIAKAD (sip.sains.ac.id) by NIM
-  - Cache SIAKAD: nama yang sudah "Cocok" di-skip, yang bermasalah di-re-cek
-  - 1 file Excel, multiple sheet: RINGKASAN + 1 sheet per kelas
-  - Penamaan sheet unik dari path folder
+─────────────────────────────────────────────────────────────
+CARA MENJALANKAN
+─────────────────────────────────────────────────────────────
 
-Cara pakai:
-  python generate_excel.py          # Normal: skip nama yang sudah "Cocok"
-  python generate_excel.py --full   # Cek semua mahasiswa dari awal (abaikan cache)
+Semua kelas:
+  python generate_excel.py                    # semua kelas, cache normal
+  python generate_excel.py --full             # semua kelas, re-cek semua NIM ke SIAKAD
 
-Credential: auth/credentials.json (OAuth2 installed)
-            auth/siakad_session.json (cookie SIAKAD)
-            auth/siakad_cache.json (cache hasil SIAKAD, auto-generated)
+Hanya kelas tahun ajaran 2024/2025:
+  python generate_excel.py --24-25            # kelas 24-25, cache normal
+  python generate_excel.py --24-25 --full     # kelas 24-25, re-cek semua NIM ke SIAKAD
+
+Hanya kelas tahun ajaran 2025/2026:
+  python generate_excel.py --25-26            # kelas 25-26, cache normal
+  python generate_excel.py --25-26 --full     # kelas 25-26, re-cek semua NIM ke SIAKAD
+
+Flag:
+  (tanpa flag)   Proses semua kelas yang ada di data.json
+  --24-25        Filter hanya kelas dari folder resource/24-25/
+  --25-26        Filter hanya kelas dari folder resource/25-26/
+  --full / -f    Abaikan cache SIAKAD, cek ulang semua NIM dari awal
+
+Output:
+  output/Monitoring_TOEFL_<timestamp>.xlsx          (tanpa filter tahun)
+  output/Monitoring_TOEFL_24-25_<timestamp>.xlsx    (--24-25)
+  output/Monitoring_TOEFL_25-26_<timestamp>.xlsx    (--25-26)
+
+─────────────────────────────────────────────────────────────
+PERSIAPAN (jalankan sekali sebelum pertama kali pakai)
+─────────────────────────────────────────────────────────────
+
+1. Install dependencies:
+     pip install -r requirements.txt
+
+2. Setup Google Drive OAuth:
+     python auth_setup.py
+   → Akan membuka browser, login dan klik Allow.
+   → Token disimpan ke auth/token.json (otomatis di-refresh kalau expired).
+
+3. Setup cookie SIAKAD (opsional, untuk kolom "Nama Cocok?"):
+   - Login ke https://sip.sains.ac.id di browser
+   - Salin cookie session ke auth/siakad_session.json
+   - Tanpa file ini, kolom nama SIAKAD akan N/A (script tetap jalan)
+
+─────────────────────────────────────────────────────────────
+FILE KONFIGURASI
+─────────────────────────────────────────────────────────────
+
+  data.json                   Daftar kelas (filePath + googleDriveUrl)
+  auth/credentials.json       OAuth2 client secret dari Google Cloud Console
+  auth/token.json             Token OAuth2 (auto-generated oleh auth_setup.py)
+  auth/siakad_session.json    Cookie session SIAKAD (isi manual)
+  auth/siakad_cache.json      Cache hasil cek SIAKAD (auto-generated)
+
+─────────────────────────────────────────────────────────────
+LOGIKA KOLOM "LAYAK SERTIFIKAT? (≥403)"
+─────────────────────────────────────────────────────────────
+
+  ✅ LAYAK    → TOEFL (Real) >= 403
+  ⚠️ WARNING  → TOEFL (Real) < 403 atau kosong, TAPI skor
+                "FINAL TEST - TOEFL ITP Test" atau
+                "SUSULAN & REMEDIAL FINAL TEST - TOEFL ITP Test" >= 26
+  ❌ TIDAK    → TOEFL (Real) < 403 dan semua skor final test < 26
+  -           → Tidak ada data skor sama sekali
 """
 
 import json
@@ -79,6 +126,8 @@ C = {
     "CERT_SKIP"   : "BDC3C7",   # Abu – tidak layak
     "PASS_BG"     : "D5F5E3",   # Hijau muda – lulus
     "FAIL_BG"     : "FADBD8",   # Merah muda – remedial
+    "WARN_BG"     : "FFF9C4",   # Kuning muda – warning final test
+    "WARN_FG"     : "B7770D",   # Kuning tua – teks warning
     "SUMMARY_BG"  : "2C3E50",
     "SUMMARY_FG"  : "F1C40F",
     "SESSION_BG"  : "EBF5FB",   # Biru sangat muda – kolom sesi
@@ -652,6 +701,21 @@ def build_class_sheet(wb, file_info, drive_service, siakad_config=None, siakad_c
             toefl_val = toefl_raw
             layak     = False
 
+        # Jika tidak layak, cek skor Final Test / Susulan untuk warning
+        warn_final = False
+        if not layak:
+            for special_key in ('FINAL TEST', 'SUSULAN & REMEDIAL FINAL TEST'):
+                col_name = specials.get(special_key)
+                if col_name:
+                    raw_final = safe(row.get(col_name, '-'))
+                    try:
+                        final_num = float(str(raw_final).replace(',', '.'))
+                        if final_num >= 26:
+                            warn_final = True
+                            break
+                    except:
+                        pass
+
         if layak:
             layak_count += 1
 
@@ -710,6 +774,9 @@ def build_class_sheet(wb, file_info, drive_service, siakad_config=None, siakad_c
         elif layak:
             cell.value = f"✅ LAYAK"
             dat(cell, bg=C["PASS_BG"], fg="1E8449", bold=True)
+        elif warn_final:
+            cell.value = "⚠️ WARNING"
+            dat(cell, bg=C["WARN_BG"], fg=C["WARN_FG"], bold=True)
         else:
             cell.value = f"❌ TIDAK"
             dat(cell, bg=C["FAIL_BG"], fg=C["CERT_NO"], bold=True)
@@ -956,6 +1023,14 @@ def main():
 
     print("\n[1b] Load config SIAKAD...")
     full_check = '--full' in sys.argv or '-f' in sys.argv
+
+    # Filter tahun ajaran berdasarkan argumen
+    year_filter = None
+    if '--24-25' in sys.argv:
+        year_filter = '24-25'
+    elif '--25-26' in sys.argv:
+        year_filter = '25-26'
+
     siakad_config = load_siakad_config()
     siakad_cache = {}
 
@@ -978,7 +1053,17 @@ def main():
     wb = openpyxl.Workbook()
     all_class_data = []
 
-    for file_info in config['files']:
+    # Filter kelas berdasarkan tahun ajaran jika ada argumen
+    files_to_process = config['files']
+    if year_filter:
+        files_to_process = [
+            f for f in files_to_process
+            if f'/{year_filter}/' in f['filePath'].replace('\\', '/') or
+               f'/{year_filter}/' in f['filePath'].replace('\\', '/').replace('./', '/')
+        ]
+        print(f"    Filter aktif: --{year_filter} → {len(files_to_process)} kelas")
+
+    for file_info in files_to_process:
         try:
             info = build_class_sheet(wb, file_info, drive_service,
                                      siakad_config, siakad_cache, full_check)
@@ -995,7 +1080,8 @@ def main():
     wb.move_sheet("RINGKASAN", offset=-len(wb.sheetnames) + 1)
 
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M")
-    output_name = f"Monitoring_TOEFL_{timestamp}.xlsx"
+    year_suffix = f"_{year_filter}" if year_filter else ""
+    output_name = f"Monitoring_TOEFL{year_suffix}_{timestamp}.xlsx"
     output_file = os.path.join(OUTPUT_DIR, output_name)
     wb.save(output_file)
 
